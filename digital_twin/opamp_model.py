@@ -1,130 +1,112 @@
 import numpy as np
 
-class InvertingAmplifier:
+
+class SummingMixer:
     """
-    Digital twin of an inverting op-amp amplifier.
-    Includes ideal gain, supply clipping, frequency response, and slew rate limiting.
+    Digital twin of a 3-channel audio mixer built from a single inverting
+    summing amplifier (LM741, dual supply).
+
+    Each channel has:
+    - its own input resistor (Rin_n) -> sets that channel's base gain
+    - its own volume fader (0.0 to 1.0) -> attenuates the signal before mixing
+
+    All channels sum into one feedback resistor (Rf) through the same
+    op-amp inverting input (virtual ground node).
+
+    Vout = -Rf * (fader1*Vin1/Rin1 + fader2*Vin2/Rin2 + fader3*Vin3/Rin3)
     """
 
-    def __init__(self, rin=10_000, rf=100_000, vcc=9.0, vee=-9.0,
-                 gbw=1_000_000, slew_rate=0.5e6):
-        self.rin = rin              # Input resistor (ohms)
-        self.rf = rf                # Feedback resistor (ohms)
-        self.vcc = vcc              # Positive supply rail
-        self.vee = vee              # Negative supply rail
-        self.gbw = gbw              # Gain-bandwidth product (Hz) — LM741 ≈ 1MHz
-        self.slew_rate = slew_rate  # Slew rate (V/s) — LM741 ≈ 0.5 V/µs = 0.5e6 V/s
+    def __init__(self, rin_list=(10_000, 10_000, 10_000), rf=47_000,
+                 vcc=9.0, vee=-9.0, gbw=1_000_000, slew_rate=0.5e6):
+        self.rin_list = list(rin_list)   # one resistor per channel
+        self.rf = rf
+        self.vcc = vcc
+        self.vee = vee
+        self.gbw = gbw
+        self.slew_rate = slew_rate
+        self.n_channels = len(rin_list)
 
-    @property
-    def gain(self):
-        """Ideal DC voltage gain (dimensionless, negative = inverted)"""
-        return -self.rf / self.rin
+    def channel_gain(self, ch_index):
+        """Gain contribution of a single channel, ignoring fader position."""
+        return -self.rf / self.rin_list[ch_index]
 
-    @property
-    def gain_db(self):
-        return 20 * np.log10(abs(self.gain))
+    def channel_current(self, ch_index, vin, fader):
+        """Current this channel injects into the summing node (amps)."""
+        return (fader * vin) / self.rin_list[ch_index]
 
-    @property
-    def cutoff_frequency(self):
-        """
-        Closed-loop bandwidth — the frequency where gain starts rolling off.
-        fc = GBW / |gain|
-        """
-        return self.gbw / abs(self.gain)
+    def summing_node_current(self, vins, faders):
+        """Total current arriving at the virtual ground node from all channels."""
+        return sum(self.channel_current(i, vins[i], faders[i])
+                   for i in range(self.n_channels))
 
-    def gain_at_frequency(self, freq):
-        """
-        Gain magnitude at a given frequency, accounting for GBW rolloff.
-        Single-pole model: gain drops -20dB/decade above cutoff frequency.
-        """
-        ideal_gain = abs(self.gain)
-        fc = self.cutoff_frequency
-        # Single-pole rolloff formula
-        gain_at_f = ideal_gain / np.sqrt(1 + (freq / fc) ** 2)
-        return gain_at_f
+    def output_voltage_ideal(self, vins, faders):
+        """Ideal (unclipped) output voltage."""
+        i_total = self.summing_node_current(vins, faders)
+        return -self.rf * i_total
 
-    def output_voltage(self, vin):
-        """DC/low-frequency output, clipped at supply rails."""
-        vout_ideal = self.gain * vin
+    def output_voltage(self, vins, faders):
+        """Real output voltage, clipped at supply rails."""
+        vout_ideal = self.output_voltage_ideal(vins, faders)
         return np.clip(vout_ideal, self.vee, self.vcc)
 
-    def output_voltage_at_frequency(self, vin_amplitude, freq):
-        """Output amplitude at a given frequency, accounting for bandwidth rolloff."""
-        gain_f = self.gain_at_frequency(freq)
-        vout_ideal = -gain_f * vin_amplitude  # negative sign preserved for inverting
-        return np.clip(vout_ideal, self.vee, self.vcc)
+    def is_clipped(self, vins, faders):
+        vout_ideal = self.output_voltage_ideal(vins, faders)
+        return abs(vout_ideal) > max(abs(self.vcc), abs(self.vee))
 
-    def input_current(self, vin):
-        return vin / self.rin
-
-    def feedback_current(self, vin):
-        vout = self.output_voltage(vin)
+    def feedback_current(self, vins, faders):
+        """Current through Rf -- equals total summing current for ideal op-amp,
+        but capped by what the clipped output can actually drive."""
+        vout = self.output_voltage(vins, faders)
         return -vout / self.rf
 
-    def power_dissipated(self, vin):
-        i_in = self.input_current(vin)
-        i_f = self.feedback_current(vin)
-        return i_in**2 * self.rin + i_f**2 * self.rf
+    def per_channel_power(self, vins, faders):
+        """Power dissipated in each channel's input resistor (mW)."""
+        powers = []
+        for i in range(self.n_channels):
+            i_ch = self.channel_current(i, vins[i], faders[i])
+            p = i_ch**2 * self.rin_list[i] * 1000  # mW
+            powers.append(p)
+        return powers
 
-    def is_slew_limited(self, vin_amplitude, freq):
-        """
-        Check if the required output slew rate exceeds the op-amp's max slew rate.
-        For a sine wave Vout = A*sin(2*pi*f*t), max slope = A * 2*pi*f
-        """
-        vout_amplitude = abs(self.gain) * vin_amplitude
-        required_slew_rate = vout_amplitude * 2 * np.pi * freq
-        return required_slew_rate > self.slew_rate, required_slew_rate
+    def total_power(self, vins, faders):
+        ch_power = sum(self.per_channel_power(vins, faders))
+        i_f = self.feedback_current(vins, faders)
+        rf_power = i_f**2 * self.rf * 1000
+        return ch_power + rf_power
 
-    def max_undistorted_frequency(self, vin_amplitude):
-        """
-        The highest frequency at which the output can still be a clean sine wave
-        before slew rate distortion kicks in.
-        """
-        vout_amplitude = abs(self.gain) * vin_amplitude
-        if vout_amplitude == 0:
-            return float('inf')
-        return self.slew_rate / (2 * np.pi * vout_amplitude)
-
-    def frequency_response(self, freq_range):
-        """Returns gain in dB across a range of frequencies — for Bode plot."""
-        gains = np.array([self.gain_at_frequency(f) for f in freq_range])
-        gains_db = 20 * np.log10(np.maximum(gains, 1e-12))
-        return gains_db
-
-    def summary(self, vin, freq=0):
-        vout = self.output_voltage(vin)
-        slew_limited, required_sr = self.is_slew_limited(abs(vin), freq) if freq > 0 else (False, 0)
-
+    def summary(self, vins, faders):
+        vout = self.output_voltage(vins, faders)
+        clipped = self.is_clipped(vins, faders)
+        channel_currents_mA = [self.channel_current(i, vins[i], faders[i]) * 1000
+                                for i in range(self.n_channels)]
         return {
-            "vin": vin,
-            "frequency_Hz": freq,
             "vout": vout,
-            "gain": self.gain,
-            "gain_db": self.gain_db,
-            "cutoff_frequency_Hz": self.cutoff_frequency,
-            "gain_at_this_freq": self.gain_at_frequency(freq) if freq > 0 else abs(self.gain),
-            "input_current_mA": self.input_current(vin) * 1000,
-            "feedback_current_mA": self.feedback_current(vin) * 1000,
-            "power_mW": self.power_dissipated(vin) * 1000,
-            "clipped": abs(self.gain * vin) > max(abs(self.vcc), abs(self.vee)),
-            "slew_rate_limited": slew_limited,
-            "required_slew_rate_V_per_s": required_sr,
+            "vout_ideal_unclipped": self.output_voltage_ideal(vins, faders),
+            "clipped": clipped,
+            "channel_currents_mA": channel_currents_mA,
+            "feedback_current_mA": self.feedback_current(vins, faders) * 1000,
+            "total_power_mW": self.total_power(vins, faders),
         }
 
 
 if __name__ == "__main__":
-    amp = InvertingAmplifier(rin=10_000, rf=100_000, vcc=9, vee=-9,
-                               gbw=1_000_000, slew_rate=0.5e6)
+    mixer = SummingMixer(rin_list=[10_000, 10_000, 10_000], rf=47_000, vcc=9, vee=-9)
 
-    print(f"DC Gain: {amp.gain} ({amp.gain_db:.1f} dB)")
-    print(f"Cutoff frequency: {amp.cutoff_frequency:.0f} Hz")
+    # Three channels: a vocal, a guitar, a backing track -- example signal levels
+    vins = [0.3, 0.2, 0.4]      # volts, peak signal level per channel
+    faders = [1.0, 0.5, 0.8]    # 0.0 = muted, 1.0 = full volume
+
+    result = mixer.summary(vins, faders)
+
+    print("Per-channel base gain (Rf/Rin):")
+    for i in range(mixer.n_channels):
+        print(f"  Channel {i+1}: {mixer.channel_gain(i):.2f}x")
+
     print()
-
-    # Test gain rolloff at different frequencies
-    test_freqs = [100, 1_000, 10_000, 100_000]
-    for f in test_freqs:
-        g = amp.gain_at_frequency(f)
-        print(f"At {f} Hz: gain = {g:.2f}x ({20*np.log10(g):.1f} dB)")
-
+    print(f"Channel input voltages: {vins}")
+    print(f"Fader positions:        {faders}")
     print()
-    print(f"Max undistorted frequency at Vin=0.5V: {amp.max_undistorted_frequency(0.5):.0f} Hz")
+    print(f"Channel currents (mA): {[round(c, 4) for c in result['channel_currents_mA']]}")
+    print(f"Output voltage (Vout):  {result['vout']:.3f} V")
+    print(f"Clipped:                {result['clipped']}")
+    print(f"Total power (mW):       {result['total_power_mW']:.3f}")

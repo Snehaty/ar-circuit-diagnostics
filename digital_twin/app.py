@@ -1,102 +1,155 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-from opamp_model import InvertingAmplifier
+from opamp_model import SummingMixer
 
-st.set_page_config(page_title="Op-Amp Digital Twin", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="3-Channel Mixer — Digital Twin", page_icon=None, layout="wide")
 
-st.title("⚡ Inverting Amplifier — Digital Twin")
-st.caption("Virtual control panel for an op-amp based inverting amplifier")
 
-col1, col2 = st.columns([1, 2])
+def draw_circuit_svg(rin_list, rf, faders):
+    """Returns an SVG string of the 3-channel summing mixer schematic."""
+    fader_labels = [f"{f:.1f}" for f in faders]
+    rin_labels = [f"{r/1000:.0f}k" for r in rin_list]
 
-with col1:
-    st.subheader("Circuit Parameters")
-    rin = st.slider("Rin (kΩ)", 1, 100, 10) * 1000
-    rf = st.slider("Rf (kΩ)", 1, 500, 100) * 1000
+    svg = f"""
+    <svg width="100%" height="320" viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+      <style>
+        .wire {{ stroke: #888; stroke-width: 2; fill: none; }}
+        .label {{ font-family: sans-serif; font-size: 13px; fill: #ccc; }}
+        .small {{ font-family: sans-serif; font-size: 11px; fill: #888; }}
+        .resistor {{ stroke: #4a9eff; stroke-width: 2; fill: none; }}
+        .opamp {{ stroke: #f0a030; stroke-width: 2; fill: #2a2a2a; }}
+      </style>
+
+      <line x1="20" y1="60" x2="100" y2="60" class="wire"/>
+      <path d="M100,60 h10 l5,-8 l10,16 l10,-16 l10,16 l10,-16 l5,8 h10" class="resistor"/>
+      <line x1="160" y1="60" x2="260" y2="60" class="wire"/>
+      <text x="20" y="48" class="label">Vin1 (fader {fader_labels[0]})</text>
+      <text x="105" y="48" class="small">Rin1={rin_labels[0]}</text>
+
+      <line x1="20" y1="130" x2="100" y2="130" class="wire"/>
+      <path d="M100,130 h10 l5,-8 l10,16 l10,-16 l10,16 l10,-16 l5,8 h10" class="resistor"/>
+      <line x1="160" y1="130" x2="260" y2="130" class="wire"/>
+      <line x1="260" y1="60" x2="260" y2="130" class="wire"/>
+      <text x="20" y="118" class="label">Vin2 (fader {fader_labels[1]})</text>
+      <text x="105" y="118" class="small">Rin2={rin_labels[1]}</text>
+
+      <line x1="20" y1="200" x2="100" y2="200" class="wire"/>
+      <path d="M100,200 h10 l5,-8 l10,16 l10,-16 l10,16 l10,-16 l5,8 h10" class="resistor"/>
+      <line x1="160" y1="200" x2="260" y2="200" class="wire"/>
+      <line x1="260" y1="130" x2="260" y2="200" class="wire"/>
+      <text x="20" y="188" class="label">Vin3 (fader {fader_labels[2]})</text>
+      <text x="105" y="188" class="small">Rin3={rin_labels[2]}</text>
+
+      <line x1="260" y1="130" x2="320" y2="130" class="wire"/>
+      <circle cx="260" cy="130" r="3" fill="#888"/>
+      <text x="180" y="148" class="small">summing node</text>
+
+      <polygon points="320,90 320,170 410,130" class="opamp"/>
+      <text x="335" y="115" class="label">-</text>
+      <text x="335" y="155" class="label">+</text>
+      <text x="345" y="135" class="small">LM741</text>
+
+      <line x1="300" y1="160" x2="320" y2="160" class="wire"/>
+      <line x1="300" y1="160" x2="300" y2="180" class="wire"/>
+      <line x1="290" y1="180" x2="310" y2="180" class="wire"/>
+      <line x1="293" y1="186" x2="307" y2="186" class="wire"/>
+      <line x1="296" y1="192" x2="304" y2="192" class="wire"/>
+      <text x="280" y="205" class="small">GND</text>
+
+      <!-- Vout: extended horizontal run before the corner -->
+      <line x1="410" y1="130" x2="480" y2="130" class="wire"/>
+      <circle cx="480" cy="130" r="3" fill="#888"/>
+      <text x="488" y="118" class="label">Vout</text>
+
+      <!-- Feedback path: vertical up from Vout node, then through Rf zigzag, then down to summing node -->
+      <line x1="480" y1="130" x2="480" y2="60" class="wire"/>
+      <line x1="480" y1="60" x2="430" y2="60" class="wire"/>
+      <path d="M430,60 h-10 l-5,-8 l-10,16 l-10,-16 l-10,16 l-10,-16 l-5,8 h-10" class="resistor"/>
+      <line x1="360" y1="60" x2="260" y2="60" class="wire"/>
+      <text x="345" y="48" class="small">Rf={rf/1000:.0f}k</text>
+
+      <text x="345" y="85" class="small">+Vcc</text>
+      <text x="345" y="180" class="small">-Vee</text>
+    </svg>
+    """
+    return svg
+
+st.title("3-Channel Audio Mixer — Digital Twin")
+st.caption("Inverting summing amplifier built around a single LM741, dual supply")
+
+left_col, right_col = st.columns([3, 2])
+
+with left_col:
+    st.subheader("Circuit parameters")
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        rin1 = st.number_input("Rin 1 (kOhm)", 1, 100, 10) * 1000
+    with col_b:
+        rin2 = st.number_input("Rin 2 (kOhm)", 1, 100, 10) * 1000
+    with col_c:
+        rin3 = st.number_input("Rin 3 (kOhm)", 1, 100, 10) * 1000
+
+    rf = st.slider("Feedback resistor Rf (kOhm)", 1, 200, 47) * 1000
     vcc = st.slider("Supply +Vcc (V)", 3.0, 15.0, 9.0, 0.5)
     vee = -vcc
-    vin = st.slider("Input voltage Vin (V)", -3.0, 3.0, 0.5, 0.1)
+
+    mixer = SummingMixer(rin_list=[rin1, rin2, rin3], rf=rf, vcc=vcc, vee=vee)
 
     st.divider()
-    st.subheader("Op-amp Non-idealities")
-    opamp_choice = st.selectbox("Op-amp model", ["LM741 (GBW=1MHz, SR=0.5V/µs)",
-                                                    "TL072 (GBW=3MHz, SR=13V/µs)",
-                                                    "Custom"])
-    if opamp_choice.startswith("LM741"):
-        gbw, slew_rate = 1_000_000, 0.5e6
-    elif opamp_choice.startswith("TL072"):
-        gbw, slew_rate = 3_000_000, 13e6
-    else:
-        gbw = st.number_input("GBW (Hz)", value=1_000_000, step=100_000)
-        slew_rate = st.number_input("Slew rate (V/s)", value=0.5e6, step=0.1e6) 
+    st.subheader("Mixing console")
 
-    signal_freq = st.slider("Signal frequency (Hz)", 10, 200_000, 1000, 10)
+    channel_cols = st.columns(3)
+    vins = []
+    faders = []
+    channel_names = ["Channel 1 (Vocal)", "Channel 2 (Guitar)", "Channel 3 (Backing track)"]
 
-    amp = InvertingAmplifier(rin=rin, rf=rf, vcc=vcc, vee=vee, gbw=gbw, slew_rate=slew_rate)
-    result = amp.summary(vin, freq=signal_freq)
+    for i, col in enumerate(channel_cols):
+        with col:
+            st.markdown(f"**{channel_names[i]}**")
+            vin = st.slider("Input level (V)", 0.0, 1.0, 0.3, 0.05, key=f"vin_{i}")
+            fader = st.slider("Fader", 0.0, 1.0, 0.8, 0.05, key=f"fader_{i}")
+            vins.append(vin)
+            faders.append(fader)
+
+    result = mixer.summary(vins, faders)
 
     st.divider()
-    st.subheader("Live Output")
+    st.subheader("Master output")
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Output voltage (Vout)", f"{result['vout']:.3f} V")
+    with m2:
+        st.metric("Feedback current", f"{result['feedback_current_mA']:.3f} mA")
+    with m3:
+        st.metric("Total power", f"{result['total_power_mW']:.3f} mW")
 
     if result["clipped"]:
-        st.error(" Output clipped! Op-amp saturated at supply rail.")
-    if result["slew_rate_limited"]:
-        st.warning(f" Slew rate limited! Output will distort into a triangle wave at this frequency.")
+        st.error(f"Output clipped at supply rail. Unclipped value would have been {result['vout_ideal_unclipped']:.2f} V -- lower a fader or input level.")
 
-    st.metric("Output voltage (Vout, DC)", f"{result['vout']:.3f} V")
-    st.metric("Gain at this frequency", f"{result['gain_at_this_freq']:.2f}x")
-    st.metric("Cutoff frequency (-3dB)", f"{result['cutoff_frequency_Hz']:,.0f} Hz")
-    st.metric("Max distortion-free freq", f"{amp.max_undistorted_frequency(abs(vin)):,.0f} Hz")
+    st.divider()
+    st.subheader("Output waveform (combined signal)")
 
-with col2:
-    st.subheader("Bode Plot — Gain vs Frequency")
+    t = np.linspace(0, 4 * np.pi, 400)
+    combined_wave = np.zeros_like(t)
+    for i in range(3):
+        freq_mult = i + 1
+        wave = vins[i] * faders[i] * np.sin(t * freq_mult)
+        combined_wave += wave / mixer.rin_list[i]
 
-    freqs = np.logspace(1, 6, 300)  # 10 Hz to 1 MHz
-    gains_db = amp.frequency_response(freqs)
+    vout_wave = np.clip(-mixer.rf * combined_wave, vee, vcc)
 
-    fig1, ax1 = plt.subplots(figsize=(8, 4))
-    ax1.semilogx(freqs, gains_db, color="#378ADD", linewidth=2)
-    ax1.axhline(amp.gain_db - 3, color="red", linestyle="--", alpha=0.6, label="-3dB point")
-    ax1.axvline(amp.cutoff_frequency, color="red", linestyle="--", alpha=0.4)
-    ax1.axvline(signal_freq, color="green", linestyle="-", alpha=0.5, label="Current signal freq")
-    ax1.set_xlabel("Frequency (Hz)")
-    ax1.set_ylabel("Gain (dB)")
-    ax1.set_title("Frequency Response")
-    ax1.legend()
-    ax1.grid(alpha=0.3, which="both")
-    st.pyplot(fig1)
-
-    st.subheader("Output waveform at this frequency")
-
-    t = np.linspace(0, 3 / signal_freq, 500)  # show 3 cycles
-    vin_wave = vin * np.sin(2 * np.pi * signal_freq * t)
-
-    # Apply gain rolloff
-    gain_f = amp.gain_at_frequency(signal_freq)
-    vout_ideal = -gain_f * vin_wave
-
-    # Apply slew rate limiting (simple model: clip the rate of change)
-    dt = t[1] - t[0]
-    max_step = amp.slew_rate * dt
-    vout_slewed = np.copy(vout_ideal)
-    for i in range(1, len(vout_slewed)):
-        delta = vout_slewed[i] - vout_slewed[i-1]
-        if abs(delta) > max_step:
-            vout_slewed[i] = vout_slewed[i-1] + np.sign(delta) * max_step
-
-    vout_final = np.clip(vout_slewed, vee, vcc)
-
-    fig2, ax2 = plt.subplots(figsize=(8, 4))
-    ax2.plot(t * 1000, vin_wave, label="Vin", color="#378ADD")
-    ax2.plot(t * 1000, vout_final, label="Vout (real)", color="#D85A30")
+    fig2, ax2 = plt.subplots(figsize=(7, 3))
+    ax2.plot(t, vout_wave, color="#D85A30", linewidth=2)
     ax2.axhline(vcc, color="gray", linestyle="--", alpha=0.4)
     ax2.axhline(vee, color="gray", linestyle="--", alpha=0.4)
-    ax2.set_xlabel("Time (ms)")
-    ax2.set_ylabel("Voltage (V)")
-    ax2.legend()
+    ax2.set_xlabel("Time (arbitrary units)")
+    ax2.set_ylabel("Vout (V)")
     ax2.grid(alpha=0.3)
     st.pyplot(fig2)
 
-    if result["slew_rate_limited"]:
-        st.caption(" Notice the output looks more like a triangle wave than a sine — that's slew rate distortion, not clipping.")
+with right_col:
+    st.subheader("Circuit schematic")
+    st.caption("Live schematic reflecting current resistor values and fader positions")
+    st.components.v1.html(draw_circuit_svg([rin1, rin2, rin3], rf, faders), height=340)
